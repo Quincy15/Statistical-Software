@@ -1,0 +1,237 @@
+---
+title: "chapter_2_code"
+author: "QIJI"
+date: "2020/9/22"
+output: 
+  html_document: 
+    highlight: tango
+    theme: readable
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+```
+
+
+```{r install packages,tidy=TRUE,cache=TRUE}
+# See whether these packages exist on comp. If not, install.
+package_list <- c("tidyr","reshape2","VIM","timeSeries","PerformanceAnalytics","fPortfolio")
+
+for(p in package_list){
+  if(!suppressWarnings(suppressMessages(require(p, character.only = TRUE, quietly = TRUE, warn.conflicts = FALSE)))) install.packages(p)
+}
+
+#load package
+for(p in package_list){
+  require(p, character.only = TRUE, quietly = TRUE, warn.conflicts = FALSE)
+}
+
+```
+
+
+## 2.1 均方差模型
+## 2.2 解的概念
+## 2.3 使用真实数据
+投资组合的最优化完全整合在随后我们会讨论的多个 R 包中，知道这一点非常有用。但是，跑步之前最好先会走路。因此，我们从一个简单的自制 R函数开始，我们把它一行行地在下面列出来。
+
+### **最优化问题3**
+在给定的收益率下，使方差最小？拉格朗日乘数法求解（两个条件,两个乘子）
+```{r function1 }
+#自编函数1
+minvariance <- function(assets, mu = 0.005) {
+  return <- log(tail(assets, -1) / head(assets, -1))              #构建收益率r：除了第一个值，每个值都除以自身的前一个值，再对每个商计算 log。
+  #tail/head(,n): n is  a single integer. 
+  #If positive, size for the resulting object. 
+  #If negative, all but the n first/last number of elements of x.
+  
+  Q <- rbind(cov(return), rep(1, ncol(assets)), colMeans(return)) #线性系统左侧矩阵的第一列
+  Q <- cbind(Q, rbind(t(tail(Q, 2)), matrix(0, 2, 2)))            #线性系统左侧矩阵的第二、三列
+  b <- c(rep(0, ncol(assets)), 1, mu)                             #线性系统右侧
+  solve(Q, b)
+}
+
+```
+
+```{r data}
+data<-read.csv("SHARADAR-SEP.csv")
+head(data) 
+str(data)
+```
+
+```{r preprocess}
+library(tidyr)                                           #使用的gather & spread
+library(reshape2)                                        #使用的函数 melt & dcast 
+
+#使用spread函数将gd1_long长数据转换为宽数据gd1_wide
+Stkcd_wide1<-spread(data[,c(1,2,6)],ticker,close)        #ticker为需要转换的变量，close为分解后的列的取值
+View(Stkcd_wide1);dim(Stkcd_wide1)                       #82个时间点，30个股票
+
+#或使用dcast函数将gd1_long长数据转换为宽数据gd1_wide1
+Stkcd_wide2<-dcast(data[,c(1,2,6)],data$date~ticker,value.var = 'close')
+View(Stkcd_wide2);dim(Stkcd_wide2)
+
+#处理缺失值
+#example<-read.csv("E:/Desktop/RESSET_DRESSTK_2016__1.csv")
+#head(example) 
+#str(example)
+#example_wide<-spread(example,Stkcd,Clpr);View(example_wide)
+#library(VIM)
+#aggr(example_wide[,-1],prop = FALSE, numbers = TRUE)      #缺失值可视化
+#apply(example_wide, 2, function(x) sum(is.na(x))>0)       #每列的具体缺失情况
+#example_wide2<-example_wide[,apply(example_wide, 2, function(x) sum(is.na(x))<10)];View(example_wide2)                     #只把缺失值少于10个的列选出来
+
+```
+
+
+函数是怎么编写的？搞清楚计算过程和逻辑！
+```{r step by step}
+assets <- Stkcd_wide1[, -1]
+return <- log(tail(assets, -1) / head(assets, -1));head(return)
+Q <- rbind(cov(return), rep(1, ncol(assets)), colMeans(return));dim(Q);round(Q,5) #第一列
+Q <- cbind(Q, rbind(t(tail(Q, 2)), matrix(0, 2, 2)));dim(Q);round(Q,5)            #后两列  
+mu = 0.005        #预期收益率为5%
+b <- c(rep(0, ncol(assets)), 1, mu)
+solve(Q, b)       #求解，得到最优权重和拉格朗日乘子
+```
+
+自编的函数等价于一步运行上述代码，它会取数据集和预期收益率作为参数，目的是得到在想要的预期收益率水平下的最小方差。
+函数计算结果给出了各资产的最优权重和朗格朗日乘子
+```{r result}
+minvariance(assets,mu=0.005)    #预期收益率为5%的最小方差
+```
+
+
+### **在更大范围的收益率求最小方差**
+```{r function2}
+frontier <- function(assets) {
+  return <- log(tail(assets, -1) / head(assets, -1))      #计算收益率
+  Q <- cov(return)                                        #协方差
+  n <- ncol(assets)                                       #资产个数
+  r <- colMeans(return)                                   #平均收益率
+  Q1 <- rbind(Q, rep(1, n), r)                            
+  Q1 <- cbind(Q1, rbind(t(tail(Q1, 2)), matrix(0, 2, 2))) #线性系统左侧
+  
+  rbase <- seq(min(r), max(r), length = 100)              #给定预期收益率范围（相当于上一例子的mu）
+  s <- sapply(rbase, function(x) {                        
+    y <- head(solve(Q1, c(rep(0, n), 1, x)), n)           #提取solve后的权重
+    y %*% Q %*% y                                         # %*% 表示通常意义下的两个矩阵的乘积，计算得到在每个收益利下的最小方差
+  })
+  plot(s, rbase, xlab = 'Variance', ylab = 'Return')      #画出Portfolio Frontier（原书有误）
+}
+```
+
+
+在方差-收益率平面上，理想的收益率-最小方差曲线叫作投资组合前沿（Portfolio Frontier）。忽略它向下方倾斜的部分（同样的方差可以用更高的预期收益率达到），我们得到了有效前沿（Efficient Frontier），毫无疑问必须选择有效前沿上的组合。众所周知，两个给定的收益率水平就足以计算投资组合前沿，把得到的投资组合连接起来就得到了整个前沿。
+```{r frontier}
+frontier(assets)
+```
+
+
+### **现有R包，直接调用！**
+```{r}
+#1、根据资产价格计算收益率
+library(timeSeries)   #根据第一列定义的 timeSeries 对象
+
+MYdata<-as.matrix(Stkcd_wide1[,-1])
+rownames(MYdata)<-Stkcd_wide1$date
+charvec <- rownames(MYdata)
+MYassets <- timeSeries(MYdata, charvec)
+str(MYassets)
+
+MYreturn1 <- log(lag(MYassets) / MYassets);head(MYreturn1) #方式1
+MYreturn2 <- returns(MYassets);head(MYreturn2)             #方式2
+
+
+library(PerformanceAnalytics)                              #画收益率
+chart.CumReturns(MYreturn2, legend.loc = 'topleft', main ='')
+```
+
+
+```{r,eval=FALSE}
+# 2、前沿图
+#通过绘出 portfolioFrontier 的结果，可以通过交互方式画出上述的前沿图像（图 2-3）。
+library(fPortfolio)
+plot(portfolioFrontier(MYreturn2))
+
+#为了模仿我们在上述代码中实现的内容，我们绘出带有卖空约束的前沿图像。
+Spec = portfolioSpec()  #设置一个特定的portfolioSpecS4 对象
+setSolver(Spec) = "solveRshortExact" #一个使无限制卖空卖出的投资组合最优化的函数
+Frontier <- portfolioFrontier(as.timeSeries(MYreturn2),Spec, constraints = "Short") #前沿图
+frontierPlot(Frontier, col = rep('orange', 2), pch = 19) #计算结果
+monteCarloPoints(Frontier, mcSteps = 1000, cex = 0.25, pch =19) #蒙特卡洛点
+grid()
+```
+
+## 2.4 切线组合和资本市场线
+当组合中加入一个无风险资产R，会发生什么？我们解决的最后一个关于均值－方差模型的问题是，如何决定市场投资组合（或等价的，CML）。
+
+通过修正方差最小化的代码，我们可以轻松地解决这个问题。首先，如果我们想加入无风险资产，就在协方差矩阵中加入了全部为 0 的一行和一列（其中 n 是总资产个数，包括无风险资产在内）。
+```{r assets_Q}
+R_assets <- Stkcd_wide1[, -1];dim(R_assets)
+R_return <- log(tail(R_assets, -1) / head(R_assets, -1))
+n <- ncol(R_assets)+1    #总资产个数，包括无风险资产在内
+mu <- 0.005              #预期收益率5%
+R_Q <- cbind(cov(R_return), rep(0, n-1));dim(R_Q)
+R_Q <- rbind(R_Q,rep(0, n));dim(R_Q)
+```
+
+
+在收益率向量中加入无风险资产。
+```{r rf}
+rf_daily<- read.csv("rf.csv");colnames(rf_daily)=c("date","rate")  
+head(rf_daily);tail(rf_daily)  #查看数据情况（有误错误数据）
+#基准利率
+rf<- mean(head(rf_daily$rate,-2))/100
+r <- c(colMeans(R_return), rf);length(r)
+knitr::kable(r)
+```
+
+然后，我们可以使用新的协方差矩阵和新的收益率向量来决定最优投资组合的
+权重，接着基于“使用真实数据工作”这一节描述的 minvariance 代码来移除第
+n 个资产。
+```{r Q}
+R_Q <- rbind(R_Q, rep(1, n), r);dim(R_Q)
+R_Q <- cbind(R_Q, rbind(t(tail(R_Q, 2)), matrix(0, 2, 2)));dim(R_Q)
+
+#str(Q)
+head(R_Q, 6)
+```
+
+
+```{r b}
+b <- c(rep(0, n), 1, mu)
+b
+```
+
+```{r result2}
+w <- solve(R_Q, b)
+w <- head(w, -3)
+w / sum(w)
+```
+
+## 2.5 协方差矩阵中的噪声
+当我们优化投资组合时，其实我们并没有真实的协方差矩阵和预期收益率向量（它们是均值-方差模型的输入量）。我们使用观测来估计它们，并得到 Q、r，而模型的输出仍然是随机变量。如果不深入细节，我们可以说模型中会产生惊人的巨大不确定性。尽管有强大数定律的保证，最优的投资组合权重会不时地在±200%之间变动。幸运的是，如果我们掌握有几年的数据（日收益率），测量风险的相对误差就仅为 20%～25%。
+
+
+## 2.6 其他度量风险的方式
+方差可以很容易地度量风险，但也存在一些缺陷。例如，在使用方差时，收益率中的正向变化也会被视为风险的增加。因此，人们开发了一些更复杂的**风险度量方法**。
+
+比如下面的这个简例，主要关于多种方法运用于之前描述过的MYreturn资产，它的目的是快速回顾 fPortfolio 包提供的选择。
+```{r other methods}
+library(fPortfolio)
+Spec <- portfolioSpec()
+setSolver(Spec) <- "solveRshortExact"
+setTargetReturn(Spec) <- mean(colMeans(MYreturn2))
+efficientPortfolio(MYreturn2, Spec, 'Short')
+minvariancePortfolio(MYreturn2, Spec, 'Short')
+minriskPortfolio(MYreturn2, Spec)
+maxreturnPortfolio(MYreturn2, Spec)
+```
+ 
+```{r}
+sessionInfo()
+```
+ 
+ 
